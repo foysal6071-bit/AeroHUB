@@ -45,6 +45,13 @@ jobs:
           echo "Project dir: $DIR"
           echo "dir=$DIR" >> "$GITHUB_OUTPUT"
 
+      # BouncyCastle duplicate-class সমস্যার ফিক্স (libadb-android jdk15to18 ব্যবহার করে)
+      - name: Fix BouncyCastle duplicate classes
+        working-directory: ${{ steps.src.outputs.dir }}
+        run: |
+          sed -i 's|org.bouncycastle:bcpkix-jdk18on:[0-9.]*|org.bouncycastle:bcpkix-jdk15to18:1.81|' app/build.gradle.kts
+          grep -n bouncycastle app/build.gradle.kts
+
       # ---------- 2) Build ----------
       - name: Set up JDK 17
         uses: actions/setup-java@v4
