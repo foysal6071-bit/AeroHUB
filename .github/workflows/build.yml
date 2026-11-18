@@ -60,12 +60,20 @@ jobs:
       - name: Build debug APK
         working-directory: ${{ steps.src.outputs.dir }}
         run: |
+          set -o pipefail
           if [ -f gradlew ]; then
             chmod +x gradlew
-            ./gradlew assembleDebug --stacktrace
+            ./gradlew assembleDebug --console=plain 2>&1 | tee build.log
           else
-            gradle assembleDebug --stacktrace
+            gradle assembleDebug --console=plain 2>&1 | tee build.log
           fi
+
+      - name: Show errors only
+        if: failure()
+        working-directory: ${{ steps.src.outputs.dir }}
+        run: |
+          echo "=============== ERRORS ==============="
+          grep -nE "^e: |error:|What went wrong|Execution failed|Could not|Duplicate class|requires" -A4 build.log | head -80
 
       - name: Collect APK
         id: apk
