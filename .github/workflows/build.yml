@@ -1,1 +1,96 @@
+name: Unzip, Build & Release APK
 
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - "*.zip"                 # রিপোর ROOT-এ নতুন/আপডেট করা zip আপলোড করলেই চলবে
+      - ".github/workflows/**"
+  workflow_dispatch:
+
+permissions:
+  contents: write               # Release বানানোর জন্য দরকার
+
+env:
+  APP_NAME: MyKuzu
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ---------- 1) Unzip ----------
+      - name: Unzip project
+        id: src
+        run: |
+          ZIP=$(ls -1 *.zip 2>/dev/null | head -n1 || true)
+          SRC=.
+          if [ -n "$ZIP" ]; then
+            echo "Unzipping: $ZIP"
+            mkdir -p _src
+            unzip -q -o "$ZIP" -d _src
+            SRC=_src
+          else
+            echo "No zip found - using repo root"
+          fi
+
+          SETTINGS=$(find "$SRC" -maxdepth 3 \( -name settings.gradle.kts -o -name settings.gradle \) | head -n1)
+          if [ -z "$SETTINGS" ]; then
+            echo "::error::settings.gradle(.kts) খুঁজে পাওয়া যায়নি - zip-এর ভেতরে Android project আছে কিনা দেখুন"
+            exit 1
+          fi
+          DIR=$(dirname "$SETTINGS")
+          echo "Project dir: $DIR"
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+
+      # ---------- 2) Build ----------
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Build debug APK
+        working-directory: ${{ steps.src.outputs.dir }}
+        run: |
+          if [ -f gradlew ]; then
+            chmod +x gradlew
+            ./gradlew assembleDebug --stacktrace
+          else
+            gradle assembleDebug --stacktrace
+          fi
+
+      - name: Collect APK
+        id: apk
+        run: |
+          APK=$(find "${{ steps.src.outputs.dir }}" -path '*build/outputs/apk/debug/*.apk' | head -n1)
+          if [ -z "$APK" ]; then
+            echo "::error::APK তৈরি হয়নি"
+            exit 1
+          fi
+          OUT="${APP_NAME}-build-${{ github.run_number }}.apk"
+          cp "$APK" "$OUT"
+          echo "file=$OUT" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}-apk
+          path: ${{ steps.apk.outputs.file }}
+
+      # ---------- 3) Release ----------
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: ${{ env.APP_NAME }} build ${{ github.run_number }}
+          files: ${{ steps.apk.outputs.file }}
+          generate_release_notes: true
+          make_latest: true
