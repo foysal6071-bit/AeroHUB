@@ -12,7 +12,7 @@ permissions:
   contents: write               # Release বানানোর জন্য দরকার
 
 env:
-  APP_NAME: MyKuzu
+  APP_NAME: AeroHUB
 
 jobs:
   build:
