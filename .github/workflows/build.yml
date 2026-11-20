@@ -70,19 +70,70 @@ jobs:
           set -o pipefail
           if [ -f gradlew ]; then
             chmod +x gradlew
-            ./gradlew assembleDebug --console=plain 2>&1 | tee build.log
+            ./gradlew assembleDebug --console=plain 2>&1 | tee build-debug.log
           else
-            gradle assembleDebug --console=plain 2>&1 | tee build.log
+            gradle assembleDebug --console=plain 2>&1 | tee build-debug.log
+          fi
+
+      # Optimized (R8 shrink) release APK. ব্যর্থ হলেও debug APK release-এ যাবে।
+      - name: Build release APK (optimized)
+        id: relbuild
+        continue-on-error: true
+        working-directory: ${{ steps.src.outputs.dir }}
+        run: |
+          set -o pipefail
+          if [ -f gradlew ]; then
+            ./gradlew assembleRelease --console=plain 2>&1 | tee build-release.log
+          else
+            gradle assembleRelease --console=plain 2>&1 | tee build-release.log
           fi
 
       - name: Show errors only
-        if: failure()
+        if: failure() || steps.relbuild.outcome == 'failure'
         working-directory: ${{ steps.src.outputs.dir }}
         run: |
           echo "=============== ERRORS ==============="
-          grep -nE "^e: |error:|What went wrong|Execution failed|Could not|Duplicate class|requires" -A4 build.log | head -80
+          cat build-*.log | grep -nE "^e: |error:|What went wrong|Execution failed|Could not|Duplicate class|Missing class|R8|requires" -A4 | head -100
 
-      - name: Collect APK
+      # ---------- Sign release APK ----------
+      # Release APK sign না থাকলে ফোনে install হয় না। Repo secrets-এ KEYSTORE_BASE64, KEYSTORE_PASSWORD,
+      # KEY_ALIAS, KEY_PASSWORD দিলে সবসময় একই key দিয়ে sign হবে (update হিসেবে install হবে)।
+      - name: Sign release APK
+        id: sign
+        if: steps.relbuild.outcome == 'success'
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          REL=$(find "${{ steps.src.outputs.dir }}" -path '*build/outputs/apk/release/*.apk' | head -n1)
+          if [ -z "$REL" ]; then echo "::warning::release APK পাওয়া যায়নি"; exit 0; fi
+          BT=$(ls -1 "$ANDROID_HOME/build-tools" | sort -V | tail -n1)
+          APKSIGNER="$ANDROID_HOME/build-tools/$BT/apksigner"
+          OUT="${APP_NAME}-build-${{ github.run_number }}-release.apk"
+
+          if "$APKSIGNER" verify "$REL" >/dev/null 2>&1; then
+            echo "Release APK আগে থেকেই signed (project-এর signingConfig)।"
+            cp "$REL" "$OUT"
+          else
+            if [ -n "$KEYSTORE_B64" ]; then
+              echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+              KS="$RUNNER_TEMP/release.keystore"; KP="$KEYSTORE_PASSWORD"; KA="${KEY_ALIAS:-pocket}"; KKP="${KEY_PASSWORD:-$KEYSTORE_PASSWORD}"
+              echo "Signing with the key from repository secrets."
+            else
+              echo "::warning::KEYSTORE_BASE64 secret নেই - এই build-এর জন্য নতুন key বানানো হচ্ছে। প্রতি build-এ key আলাদা হবে, তাই পুরনো app-এর ওপর update হবে না। Secrets যোগ করুন।"
+              KS="$RUNNER_TEMP/release.keystore"; KP="android123"; KA="release"; KKP="android123"
+              keytool -genkeypair -keystore "$KS" -storepass "$KP" -keypass "$KKP" -alias "$KA" \
+                -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=${APP_NAME}"
+            fi
+            "$APKSIGNER" sign --ks "$KS" --ks-pass "pass:$KP" --ks-key-alias "$KA" --key-pass "pass:$KKP" --out "$OUT" "$REL"
+            "$APKSIGNER" verify "$OUT"
+          fi
+          ls -la "$OUT"
+          echo "file=$OUT" >> "$GITHUB_OUTPUT"
+
+      - name: Collect debug APK
         id: apk
         run: |
           APK=$(find "${{ steps.src.outputs.dir }}" -path '*build/outputs/apk/debug/*.apk' | head -n1)
@@ -90,15 +141,22 @@ jobs:
             echo "::error::APK তৈরি হয়নি"
             exit 1
           fi
-          OUT="${APP_NAME}-build-${{ github.run_number }}.apk"
+          OUT="${APP_NAME}-build-${{ github.run_number }}-debug.apk"
           cp "$APK" "$OUT"
           echo "file=$OUT" >> "$GITHUB_OUTPUT"
 
-      - name: Upload artifact
+      - name: Upload artifact (debug)
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.APP_NAME }}-apk
+          name: ${{ env.APP_NAME }}-apk-debug
           path: ${{ steps.apk.outputs.file }}
+
+      - name: Upload artifact (release)
+        if: steps.sign.outputs.file != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}-apk-release
+          path: ${{ steps.sign.outputs.file }}
 
       # ---------- 3) Release ----------
       - name: Publish GitHub Release
@@ -106,6 +164,8 @@ jobs:
         with:
           tag_name: build-${{ github.run_number }}
           name: ${{ env.APP_NAME }} build ${{ github.run_number }}
-          files: ${{ steps.apk.outputs.file }}
+          files: |
+            ${{ steps.sign.outputs.file }}
+            ${{ steps.apk.outputs.file }}
           generate_release_notes: true
           make_latest: true
